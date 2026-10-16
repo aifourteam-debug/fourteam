@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TextItem, QuestionItem, QuizGradingResult, QuestionLevel } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -182,9 +182,11 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
     if (errorMessage) setErrorMessage(null);
   };
 
+  const isSubmittingRef = useRef(false);
+
   // Submit and grade the entire quiz
   const handleSubmitQuiz = async () => {
-    if (quizStatus === 'grading') return;
+    if (quizStatus === 'grading' || isSubmittingRef.current) return;
 
     // 1. Strict validation: 100% completion required
     if (!isAllAnswered) {
@@ -213,6 +215,7 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
     }
 
     // 2. Start grading state
+    isSubmittingRef.current = true;
     setValidationAttempted(false);
     setErrorMessage(null);
     setQuizStatus('grading');
@@ -259,6 +262,9 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
         const earnedCoins = 25 + Math.round(finalScore / 5);
         const earnedXP = 50 + Math.round(finalScore / 2);
         setRewardEarned({ coins: earnedCoins, xp: earnedXP, isFirstTime: true });
+        try {
+          localStorage.setItem(`readmind_rewarded_${user?.username || 'guest'}_${text.id}`, 'true');
+        } catch {}
       } else {
         setRewardEarned({ coins: 0, xp: 0, isFirstTime: false });
       }
@@ -282,6 +288,8 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
       console.error('Submit quiz error:', err);
       setErrorMessage(err.message || 'Không thể kết nối với hệ thống chấm điểm AI. Em hãy kiểm tra mạng và bấm Thử lại nhé!');
       setQuizStatus(isAllAnswered ? 'ready_to_submit' : 'in_progress');
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 
@@ -1028,6 +1036,8 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
             {questions.map((q, idx) => {
               const isAnswered = isQuestionAnswered(q);
               const isCurrent = idx === currentIndex;
+              const isMissing = validationAttempted && !isAnswered;
+
               return (
                 <button
                   key={q.id}
@@ -1035,10 +1045,13 @@ export const QuizSystem: React.FC<QuizSystemProps> = ({
                   className={`w-8 h-8 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                     isCurrent
                       ? 'bg-[#00A99D] text-white shadow-xs'
+                      : isMissing
+                      ? 'bg-rose-100 text-rose-700 border-2 border-rose-500 animate-pulse'
                       : isAnswered
                       ? 'bg-[#E0F8F3] text-[#007F76] border border-[#B2EADF]'
                       : 'bg-[#F4FAFF] text-[#61758A] border border-[#E0EBF4]'
                   }`}
+                  title={`Câu ${idx + 1}: ${isAnswered ? 'Đã trả lời' : isMissing ? 'Chưa trả lời (Cần hoàn thành)' : 'Chưa làm'}`}
                 >
                   {idx + 1}
                 </button>

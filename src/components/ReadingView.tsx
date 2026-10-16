@@ -61,7 +61,8 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
   const [loadingWordAi, setLoadingWordAi] = useState(false);
 
   // ================= TEXT-TO-SPEECH (TTS) STATE =================
-  // Exclusively authentic Northern Vietnamese Female Voice (Hà Nội chuẩn, truyền cảm)
+  // Authentic Northern Vietnamese Teacher Voices (Hà Nội chuẩn, giàu cảm xúc, truyền cảm)
+  const [selectedVoice, setSelectedVoice] = useState<'female' | 'male'>('female');
   const [isLoadingAIVoice, setIsLoadingAIVoice] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isPausedAudio, setIsPausedAudio] = useState(false);
@@ -72,6 +73,15 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
   const audioCacheRef = useRef<Map<number, HTMLAudioElement>>(new Map());
   const preloadingMapRef = useRef<Map<number, Promise<HTMLAudioElement | null>>>(new Map());
   const isPlayingRef = useRef<boolean>(false);
+
+  // Clear cache and restart if voice changes
+  const handleVoiceChange = (newVoice: 'female' | 'male') => {
+    if (newVoice === selectedVoice) return;
+    handleStopAudio();
+    audioCacheRef.current.clear();
+    preloadingMapRef.current.clear();
+    setSelectedVoice(newVoice);
+  };
 
   // Split text into sentences for tracking highlight
   const sentences = React.useMemo(() => {
@@ -171,13 +181,14 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
 
     const promise = (async () => {
       try {
-        const textToSpeak = chunkSentences.join(' ');
+        const textToSpeak = text.isPoem ? chunkSentences.join('\n') : chunkSentences.join(' ');
         const res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text: textToSpeak,
             isPoem: Boolean(text.isPoem),
+            voice: selectedVoice,
           }),
         });
 
@@ -214,13 +225,12 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
     }
   };
 
-  // Play Northern Vietnamese Female Voice (Hà Nội chuẩn)
+  // Play Northern Vietnamese Teacher Voice (Hà Nội chuẩn, truyền cảm)
   const handleStartAudio = async (startIndex = 0) => {
     if (startIndex >= sentences.length) {
       handleStopAudio();
-      addXP(30);
       try {
-        confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
+        confetti({ particleCount: 30, spread: 50, origin: { y: 0.6 } });
       } catch {}
       return;
     }
@@ -239,8 +249,6 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
     setIsPausedAudio(false);
     setActiveSentenceIndex(startIndex);
     setVoiceNotice(null);
-
-    preloadNextChunk(startIndex);
 
     let audio = audioCacheRef.current.get(startIndex) || null;
     if (!audio) {
@@ -266,6 +274,12 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
       setIsPlayingAudio(true);
       setIsPausedAudio(false);
       setActiveSentenceIndex(startIndex);
+      // Preload next chunk smoothly only after current audio is actively playing
+      setTimeout(() => {
+        if (isPlayingRef.current) {
+          preloadNextChunk(startIndex);
+        }
+      }, 400);
     };
 
     audio.ontimeupdate = () => {
@@ -284,9 +298,8 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
         setIsPlayingAudio(false);
         setIsPausedAudio(false);
         setActiveSentenceIndex(-1);
-        addXP(30);
         try {
-          confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
+          confetti({ particleCount: 40, spread: 50, origin: { y: 0.6 } });
         } catch {}
       }
     };
@@ -856,34 +869,53 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
             <div className="bg-[#F4FAFF] p-4 sm:p-5 rounded-2xl border border-[#E0EBF4] space-y-3 shadow-xs">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center space-x-2.5">
-                  <div className="w-10 h-10 rounded-2xl bg-[#E0F8F3] text-[#00A99D] flex items-center justify-center shadow-xs">
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shadow-xs transition-colors ${
+                    isPlayingAudio ? 'bg-[#00A99D] text-white animate-pulse' : 'bg-[#E0F8F3] text-[#00A99D]'
+                  }`}>
                     <Volume2 className="w-5 h-5" />
                   </div>
                   <div>
                     <div className="flex items-center space-x-2">
                       <p className="text-xs sm:text-sm font-bold text-[#102A43]">
-                        Giọng đọc mẫu: Nữ chuẩn Bắc (Hà Nội)
+                        Giọng đọc mẫu: {selectedVoice === 'male' ? 'Thầy giáo Nam Minh (Nam Hà Nội)' : 'Cô giáo Hoài My (Nữ Hà Nội)'}
                       </p>
                       <span className="text-[10px] bg-white text-[#007F76] font-bold px-2 py-0.5 rounded-full border border-[#B2EADF]">
-                        Âm điệu truyền cảm
+                        Chuẩn truyền cảm &bull; Biểu cảm văn học
                       </span>
                     </div>
                     <p className="text-[11px] text-[#61758A]">
-                      Phát âm chuẩn tiếng Việt Bắc Bộ, tròn vành rõ chữ, ngắt nhịp văn học biểu cảm
+                      Giọng đọc chuẩn ngữ âm Hà Nội, ngắt nhịp lắng đọng, truyền tải trọn vẹn cảm xúc tác phẩm
                     </p>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {/* Standard Northern Hanoi Female Voice Badge */}
-                  <div className="flex items-center space-x-2 bg-gradient-to-r from-[#E0F8F3] to-[#EAF6FF] text-[#007F76] px-3.5 py-2 rounded-xl border border-[#B2EADF] text-xs font-bold shadow-2xs">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span className="flex items-center space-x-1.5">
-                      <span>🌸 Nữ Hà Nội chuẩn</span>
-                      <span className="text-[11px] text-[#007F76]/80 font-medium">· Truyền cảm xúc</span>
-                    </span>
-                  </div>
+                {/* Voice Selection Toggle */}
+                <div className="flex items-center bg-white p-1 rounded-2xl border border-[#E0EBF4] shadow-xs text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => handleVoiceChange('female')}
+                    className={`px-3 py-1.5 rounded-xl transition-all cursor-pointer flex items-center space-x-1.5 ${
+                      selectedVoice === 'female'
+                        ? 'bg-[#00A99D] text-white shadow-xs'
+                        : 'text-[#61758A] hover:text-[#102A43]'
+                    }`}
+                  >
+                    <span>🌸 Cô giáo Hoài My</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleVoiceChange('male')}
+                    className={`px-3 py-1.5 rounded-xl transition-all cursor-pointer flex items-center space-x-1.5 ${
+                      selectedVoice === 'male'
+                        ? 'bg-[#102A43] text-white shadow-xs'
+                        : 'text-[#61758A] hover:text-[#102A43]'
+                    }`}
+                  >
+                    <span>🌿 Thầy giáo Nam Minh</span>
+                  </button>
+                </div>
 
+                <div className="flex flex-wrap items-center gap-2">
                   {/* Speed selector */}
                   <div className="flex items-center space-x-1 bg-white px-2 py-1 rounded-xl border border-[#E0EBF4] text-xs font-semibold text-[#61758A] shadow-xs">
                     <span className="text-[10px] text-[#61758A]">Tốc độ:</span>
@@ -907,7 +939,7 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
                   {isLoadingAIVoice ? (
                     <div className="inline-flex items-center space-x-1.5 bg-[#E0F8F3] text-[#007F76] px-4 py-2 rounded-xl text-xs font-bold border border-[#B2EADF] animate-pulse">
                       <Sparkles className="w-3.5 h-3.5 animate-spin text-[#00A99D]" />
-                      <span>Đang kết nối cô giáo Hà Nội đọc mẫu...</span>
+                      <span>{selectedVoice === 'male' ? 'Đang kết nối Thầy giáo Nam Minh đọc mẫu...' : 'Đang kết nối Cô giáo Hoài My đọc mẫu...'}</span>
                     </div>
                   ) : !isPlayingAudio ? (
                     <button

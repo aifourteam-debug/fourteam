@@ -56,7 +56,8 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
   const [selectedStanzaIndex, setSelectedStanzaIndex] = useState<number>(0);
   const [selectedLineIndex, setSelectedLineIndex] = useState<number | null>(null);
 
-  // Audio / TTS State - Standard Northern Vietnamese Female Voice (Hà Nội chuẩn)
+  // Audio / TTS State - Expressive Northern Vietnamese Teacher Voices (Hà Nội chuẩn)
+  const [selectedVoice, setSelectedVoice] = useState<'female' | 'male'>('female');
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isPausedAudio, setIsPausedAudio] = useState(false);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
@@ -69,12 +70,20 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
   const poemPaperRef = useRef<HTMLDivElement | null>(null);
 
   // Audio Queue & Preloading refs to guarantee seamless, uninterrupted poem recitation
-  const audioCacheRef = useRef<Map<number, HTMLAudioElement>>(new Map());
-  const preloadingPromisesRef = useRef<Map<number, Promise<HTMLAudioElement | null>>>(new Map());
+  const audioCacheRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const preloadingPromisesRef = useRef<Map<string, Promise<HTMLAudioElement | null>>>(new Map());
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const nextStanzaTimerRef = useRef<any>(null);
   const isPlayingRef = useRef<boolean>(false);
   const currentStanzaIdxRef = useRef<number>(-1);
+
+  const handleVoiceChange = (newVoice: 'female' | 'male') => {
+    if (newVoice === selectedVoice) return;
+    handleStopPoem();
+    audioCacheRef.current.clear();
+    preloadingPromisesRef.current.clear();
+    setSelectedVoice(newVoice);
+  };
 
   // Analysis data computed for this poem
   const analysis = React.useMemo(() => getPoemAnalysis(text), [text]);
@@ -163,12 +172,13 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
   const loadStanzaAudio = async (stanzaIdx: number, retryCount = 0): Promise<HTMLAudioElement | null> => {
     if (stanzaIdx < 0 || stanzaIdx >= stanzas.length) return null;
 
-    if (audioCacheRef.current.has(stanzaIdx)) {
-      return audioCacheRef.current.get(stanzaIdx)!;
+    const cacheKey = `${selectedVoice}_${stanzaIdx}`;
+    if (audioCacheRef.current.has(cacheKey)) {
+      return audioCacheRef.current.get(cacheKey)!;
     }
 
-    if (preloadingPromisesRef.current.has(stanzaIdx)) {
-      return preloadingPromisesRef.current.get(stanzaIdx)!;
+    if (preloadingPromisesRef.current.has(cacheKey)) {
+      return preloadingPromisesRef.current.get(cacheKey)!;
     }
 
     const promise = (async () => {
@@ -182,7 +192,7 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
           body: JSON.stringify({
             text: stanzaText,
             isPoem: true,
-            preferEngine: 'hanoi-female'
+            voice: selectedVoice,
           })
         });
 
@@ -199,7 +209,7 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
         audio.preload = 'auto';
         audio.playbackRate = 0.94; // Lyrical poetic pacing
 
-        audioCacheRef.current.set(stanzaIdx, audio);
+        audioCacheRef.current.set(cacheKey, audio);
         return audio;
       } catch (err) {
         console.warn(`Lỗi tải giọng đọc khổ ${stanzaIdx + 1}:`, err);
@@ -209,11 +219,11 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
         }
         return null;
       } finally {
-        preloadingPromisesRef.current.delete(stanzaIdx);
+        preloadingPromisesRef.current.delete(cacheKey);
       }
     })();
 
-    preloadingPromisesRef.current.set(stanzaIdx, promise);
+    preloadingPromisesRef.current.set(cacheKey, promise);
     return promise;
   };
 
@@ -262,11 +272,9 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
       setActiveSpeakingLineIdx(currentStanza.lines[0].globalIdx);
     }
 
-    // Preload ahead in the background for zero-latency transition
-    preloadNextStanzas(stanzaIdx);
-
     // Retrieve or fetch audio for this stanza
-    let audio = audioCacheRef.current.get(stanzaIdx) || null;
+    const cacheKey = `${selectedVoice}_${stanzaIdx}`;
+    let audio = audioCacheRef.current.get(cacheKey) || null;
     if (!audio) {
       setIsLoadingAudio(true);
       audio = await loadStanzaAudio(stanzaIdx);
@@ -343,6 +351,12 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
       await audio.play();
       setIsPlayingAudio(true);
       setIsPausedAudio(false);
+      // Preload next stanzas smoothly while current audio is playing
+      setTimeout(() => {
+        if (isPlayingRef.current) {
+          preloadNextStanzas(stanzaIdx);
+        }
+      }, 500);
     } catch (playErr) {
       console.warn('Audio play() call was interrupted:', playErr);
     }
@@ -547,13 +561,24 @@ export const PoetryReader: React.FC<PoetryReaderProps> = ({
             </button>
           </div>
 
-          {/* Standardized Northern Hanoi Female Voice Badge */}
-          <div className="flex items-center bg-gradient-to-r from-[#E0F8F3] to-[#EAF6FF] border border-[#BDE8E0] rounded-xl px-3 py-1.5 gap-1.5 shadow-2xs">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span className="text-xs font-bold text-[#007F76] flex items-center space-x-1">
-              <span>🌸 Nữ Hà Nội chuẩn</span>
-              <span className="text-[11px] text-[#007F76]/80 font-medium">· Truyền cảm</span>
-            </span>
+          {/* Teacher Voice Switcher */}
+          <div className="flex items-center bg-[#F4FAFF] border border-[#E0EBF4] rounded-xl p-0.5 shadow-2xs">
+            <button
+              onClick={() => handleVoiceChange('female')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center space-x-1 ${
+                selectedVoice === 'female' ? 'bg-[#00A99D] text-white shadow-xs' : 'text-[#61758A] hover:bg-white'
+              }`}
+            >
+              <span>🌸 Cô Hoài My</span>
+            </button>
+            <button
+              onClick={() => handleVoiceChange('male')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center space-x-1 ${
+                selectedVoice === 'male' ? 'bg-[#102A43] text-white shadow-xs' : 'text-[#61758A] hover:bg-white'
+              }`}
+            >
+              <span>🌿 Thầy Nam Minh</span>
+            </button>
           </div>
 
           {/* Text-to-Speech Poetic Reading Controls */}

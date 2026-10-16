@@ -4,6 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
@@ -648,30 +649,90 @@ Hãy nhận xét việc đọc của học sinh một cách chân thành, khích
   }
 });
 
-// In-memory caches for instant, quota-free playback across all poetry and text items
+// Disk and in-memory caches for instant, quota-free playback across all poetry and text items
+const ttsDiskCacheDir = path.resolve(process.cwd(), '.cache', 'tts');
+if (!fs.existsSync(ttsDiskCacheDir)) {
+  try { fs.mkdirSync(ttsDiskCacheDir, { recursive: true }); } catch {}
+}
+
 const ttsCache = new Map<string, { audioBase64: string; mimeType: string }>();
 const poemAudioCache = new Map<string, { poemId: string; title: string; stanzas: { stanzaIndex: number; audioBase64: string; mimeType: string }[] }>();
 
-// Helper: High-fidelity Northern Vietnamese Female Voice (Hà Nội chuẩn, truyền cảm) via Microsoft Edge Neural Voice (vi-VN-HoaiMyNeural)
-async function synthesizeWithEdgeTTS(text: string, isPoem = false): Promise<Buffer> {
+// Serialization Queue (Mutex) for Edge TTS to prevent concurrent WebSocket connection bursts
+let ttsQueue = Promise.resolve<any>(undefined);
+function runInTTSQueue<T>(task: () => Promise<T>): Promise<T> {
+  const next = ttsQueue.then(async () => {
+    // Add 120ms breathing space between consecutive Edge TTS calls
+    await new Promise(r => setTimeout(r, 120));
+    return task();
+  });
+  ttsQueue = next.catch(() => {});
+  return next;
+}
+
+// Circuit breaker: If Microsoft Edge TTS issues HTTP 429, back off for 60 seconds
+let edgeTTSCircuitBreakerUntil = 0;
+
+// Helper: High-fidelity Northern Vietnamese Teacher Voices (Hà Nội chuẩn, giàu cảm xúc & truyền cảm)
+// Voices:
+// - Female (Cô giáo Hoài My): vi-VN-HoaiMyNeural (ngọt ngào, ân cần, giàu cảm xúc biểu cảm)
+// - Male (Thầy giáo Nam Minh): vi-VN-NamMinhNeural (trầm ấm, hào sảng, truyền cảm và lắng đọng)
+async function synthesizeWithEdgeTTS(
+  text: string, 
+  isPoem = false, 
+  voiceGender: 'female' | 'male' = 'female'
+): Promise<Buffer> {
   const tts = new MsEdgeTTS();
-  await tts.setMetadata('vi-VN-HoaiMyNeural', OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+  const voiceName = voiceGender === 'male' ? 'vi-VN-NamMinhNeural' : 'vi-VN-HoaiMyNeural';
   
-  // Pedagogical and lyrical pacing:
-  // -10% rate for poetry: gentle, meditative, natural breath pause
-  // -6% rate for prose: articulate, clear, conversational and warm
-  // +1Hz pitch: sweet, natural, clear female teacher voice
+  await tts.setMetadata(voiceName, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+  
+  // Natural literary pacing:
+  // - Poetry: gentle, meditative, expressive breath pauses
+  // - Prose: articulate, warm, storytelling inflection
   const options = {
-    rate: isPoem ? '-10%' : '-6%',
-    pitch: '+1Hz',
+    rate: isPoem ? (voiceGender === 'male' ? '-10%' : '-11%') : (voiceGender === 'male' ? '-5%' : '-7%'),
+    pitch: voiceGender === 'male' ? '-1Hz' : '+0Hz',
   };
 
-  const { audioStream } = tts.toStream(text, options);
   return new Promise<Buffer>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    audioStream.on('data', (chunk: Buffer) => chunks.push(chunk));
-    audioStream.on('end', () => resolve(Buffer.concat(chunks)));
-    audioStream.on('error', (err: any) => reject(err));
+    let isSettled = false;
+    const timeout = setTimeout(() => {
+      if (!isSettled) {
+        isSettled = true;
+        try { tts.close(); } catch {}
+        reject(new Error('Edge TTS request timeout (8s)'));
+      }
+    }, 8000);
+
+    try {
+      const { audioStream } = tts.toStream(text, options);
+      const chunks: Buffer[] = [];
+      audioStream.on('data', (chunk: Buffer) => chunks.push(chunk));
+      audioStream.on('end', () => {
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timeout);
+          try { tts.close(); } catch {}
+          resolve(Buffer.concat(chunks));
+        }
+      });
+      audioStream.on('error', (err: any) => {
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timeout);
+          try { tts.close(); } catch {}
+          reject(err);
+        }
+      });
+    } catch (err) {
+      if (!isSettled) {
+        isSettled = true;
+        clearTimeout(timeout);
+        try { tts.close(); } catch {}
+        reject(err);
+      }
+    }
   });
 }
 
@@ -707,47 +768,95 @@ async function synthesizeBackupTTS(text: string): Promise<Buffer> {
   return Buffer.concat(audioBuffers);
 }
 
-async function generateHanoiFemaleTTS(rawText: string, isPoem = false): Promise<{ audioBase64: string; mimeType: string }> {
-  const clean = rawText.trim();
-  if (!clean) {
-    throw new Error('Nội dung văn bản trống.');
-  }
-
-  const cacheKey = `${isPoem ? 'poem' : 'prose'}:${clean}`;
-  if (ttsCache.has(cacheKey)) {
-    return ttsCache.get(cacheKey)!;
-  }
-
-  // Format text for natural, expressive pauses and lyrical cadence
-  let textToSynthesize = clean;
+// Preprocessor to bring rich literary emotion and cadence to Vietnamese text
+function prepareLiterarySpeechText(rawText: string, isPoem = false): string {
+  // Strip any HTML/XML tags that might break TTS synthesis
+  let clean = rawText.replace(/<[^>]*>/g, '').trim();
+  
   if (isPoem) {
-    // Split into stanzas first (separated by empty lines)
+    // Preserve stanza separation and ensure lyrical pacing at verse endings
     const stanzasRaw = clean.split(/\n\s*\n/);
-    textToSynthesize = stanzasRaw.map(stanza => {
+    return stanzasRaw.map(stanza => {
       const lines = stanza.split('\n');
       return lines.map(line => {
         const trimmed = line.trim();
         if (!trimmed) return '';
-        // Subtle pause punctuation at verse endings for natural breath pause
+        // Subtle pause punctuation at verse endings for natural breath cadence
         if (/[.,!?:;…\-–—]$/.test(trimmed)) {
           return trimmed;
         }
         return trimmed + ',';
       }).filter(Boolean).join('\n');
-    }).filter(Boolean).join(' ...\n\n'); // Ellipsis gives a respectful, longer reflective pause between stanzas
+    }).filter(Boolean).join(' ...\n\n');
   }
 
-  let audioBuffer: Buffer | null = null;
-  try {
-    audioBuffer = await synthesizeWithEdgeTTS(textToSynthesize, isPoem);
-  } catch (edgeErr: any) {
-    console.warn('Edge TTS attempt 1 failed, retrying once...', edgeErr?.message);
-    await new Promise(r => setTimeout(r, 300));
+  // For prose: ensure soft pauses around dashes and semicolons
+  return clean
+    .replace(/\s+/g, ' ')
+    .replace(/\s*;\s*/g, '; ')
+    .replace(/\s*:\s*/g, ': ')
+    .replace(/\s*—\s*/g, ' — ')
+    .trim();
+}
+
+async function generateHanoiVoiceTTS(
+  rawText: string, 
+  isPoem = false, 
+  voiceGender: 'female' | 'male' = 'female'
+): Promise<{ audioBase64: string; mimeType: string }> {
+  const clean = rawText.trim();
+  if (!clean) {
+    throw new Error('Nội dung văn bản trống.');
+  }
+
+  const cacheKey = `${voiceGender}:${isPoem ? 'poem' : 'prose'}:${clean}`;
+  
+  // 1. Check in-memory cache
+  if (ttsCache.has(cacheKey)) {
+    return ttsCache.get(cacheKey)!;
+  }
+
+  // 2. Check disk cache
+  const hash = crypto.createHash('sha256').update(cacheKey).digest('hex');
+  const diskPath = path.join(ttsDiskCacheDir, `${hash}.json`);
+  if (fs.existsSync(diskPath)) {
     try {
-      audioBuffer = await synthesizeWithEdgeTTS(textToSynthesize, isPoem);
-    } catch (retryErr: any) {
-      console.error('Edge TTS attempt 2 failed, using backup speech engine:', retryErr?.message);
+      const diskData = JSON.parse(fs.readFileSync(diskPath, 'utf8'));
+      if (diskData && diskData.audioBase64) {
+        ttsCache.set(cacheKey, diskData);
+        return diskData;
+      }
+    } catch {}
+  }
+
+  const textToSynthesize = prepareLiterarySpeechText(clean, isPoem);
+
+  let audioBuffer: Buffer | null = null;
+  const isCircuitBroken = Date.now() < edgeTTSCircuitBreakerUntil;
+
+  if (!isCircuitBroken) {
+    try {
+      audioBuffer = await runInTTSQueue(() => synthesizeWithEdgeTTS(textToSynthesize, isPoem, voiceGender));
+    } catch (edgeErr: any) {
+      const errMsg = edgeErr?.message || '';
+      if (errMsg.includes('429')) {
+        console.warn(`Edge TTS (${voiceGender}) rate limited (429). Activating 60s circuit breaker and switching to backup engine.`);
+        edgeTTSCircuitBreakerUntil = Date.now() + 60000;
+      } else {
+        console.warn(`Edge TTS (${voiceGender}) error: ${errMsg}. Switching to backup engine.`);
+      }
+      try {
+        audioBuffer = await synthesizeBackupTTS(textToSynthesize);
+      } catch (backupErr: any) {
+        console.error('Backup TTS error:', backupErr?.message);
+      }
+    }
+  } else {
+    // Circuit breaker is active, avoid hitting Microsoft to prevent 429 errors
+    try {
       audioBuffer = await synthesizeBackupTTS(textToSynthesize);
+    } catch (backupErr: any) {
+      console.error('Backup TTS error during circuit break:', backupErr?.message);
     }
   }
 
@@ -761,23 +870,29 @@ async function generateHanoiFemaleTTS(rawText: string, isPoem = false): Promise<
   };
 
   ttsCache.set(cacheKey, result);
+  try {
+    fs.writeFileSync(diskPath, JSON.stringify(result));
+  } catch {}
+
   return result;
 }
 
-// 5. API: Text-to-Speech Northern Vietnamese Female Voice (Hà Nội chuẩn, truyền cảm)
+// 5. API: Text-to-Speech Northern Vietnamese Expressive Teacher Voices (Hà Nội chuẩn, truyền cảm)
 app.post('/api/tts', async (req: Request, res: Response) => {
   try {
-    const { text, isPoem = false } = req.body;
+    const { text, isPoem = false, voice = 'female', preferEngine } = req.body;
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Nội dung văn bản (text) không được để trống.' });
     }
 
     const cleanText = text.trim();
-    const result = await generateHanoiFemaleTTS(cleanText, Boolean(isPoem));
+    const voiceGender: 'female' | 'male' = (voice === 'male' || preferEngine === 'hanoi-male') ? 'male' : 'female';
+    const result = await generateHanoiVoiceTTS(cleanText, Boolean(isPoem), voiceGender);
     return res.json({
       audioBase64: result.audioBase64,
       mimeType: result.mimeType,
-      engine: 'vi-VN-HoaiMyNeural-hanoi-female',
+      voice: voiceGender,
+      engine: voiceGender === 'male' ? 'vi-VN-NamMinhNeural-hanoi-male' : 'vi-VN-HoaiMyNeural-hanoi-female',
     });
   } catch (error: any) {
     console.error('TTS endpoint error:', error);
@@ -790,23 +905,26 @@ app.post('/api/tts', async (req: Request, res: Response) => {
 // 6. API: Generate / Retrieve Full Poem Audio for all stanzas (Hà Nội chuẩn, zero latency transitions)
 app.post('/api/tts/poem-audio', async (req: Request, res: Response) => {
   try {
-    const { poemId, title = 'Bài thơ', stanzas } = req.body;
+    const { poemId, title = 'Bài thơ', stanzas, voice = 'female' } = req.body;
     if (!poemId || !Array.isArray(stanzas) || stanzas.length === 0) {
       return res.status(400).json({ error: 'Yêu cầu poemId và danh sách các khổ thơ (stanzas).' });
     }
 
+    const voiceGender: 'female' | 'male' = voice === 'male' ? 'male' : 'female';
+    const cacheKey = `${voiceGender}:${poemId}`;
+
     // Check pre-cached poem audio
-    if (poemAudioCache.has(poemId)) {
-      return res.json(poemAudioCache.get(poemId)!);
+    if (poemAudioCache.has(cacheKey)) {
+      return res.json(poemAudioCache.get(cacheKey)!);
     }
 
-    // Generate audio for each stanza sequentially with high quality Hanoi female voice
+    // Generate audio for each stanza sequentially with high quality Hanoi voice
     const stanzasAudio: { stanzaIndex: number; audioBase64: string; mimeType: string }[] = [];
     for (let i = 0; i < stanzas.length; i++) {
       const stanzaText = typeof stanzas[i] === 'string' ? stanzas[i] : (stanzas[i]?.text || '');
       if (!stanzaText.trim()) continue;
 
-      const audioResult = await generateHanoiFemaleTTS(stanzaText, true);
+      const audioResult = await generateHanoiVoiceTTS(stanzaText, true, voiceGender);
       stanzasAudio.push({
         stanzaIndex: i,
         audioBase64: audioResult.audioBase64,
@@ -817,11 +935,11 @@ app.post('/api/tts/poem-audio', async (req: Request, res: Response) => {
     const payload = {
       poemId,
       title,
-      engine: 'standard-hanoi-female',
+      engine: voiceGender === 'male' ? 'vi-VN-NamMinhNeural-hanoi-male' : 'vi-VN-HoaiMyNeural-hanoi-female',
       stanzas: stanzasAudio,
     };
 
-    poemAudioCache.set(poemId, payload);
+    poemAudioCache.set(cacheKey, payload);
     return res.json(payload);
   } catch (error: any) {
     console.error('Poem audio package generation error:', error);
